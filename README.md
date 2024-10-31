@@ -31,5 +31,4 @@ The `scripts` folder contains R scripts for various stages of the project:
 
 The `reports` folder includes documentation and reports related to the project:
 
-- **`project_memo.qmd`**: The initial project memo outlining data quality checks, target variable analysis, potential data issues, and next steps.
 - **`final_report.qmd`**: The comprehensive final report summarizing the entire project, including findings and model performance.
