@@ -1,0 +1,1528 @@
+---
+title: "Credit Risk Prediction Model for Default Prevention"
+subtitle: |
+  | Final Project 
+  | Foundations of Data Science with R (STAT 359)
+author: "Casey Arbelaez"
+date: today
+
+format:
+  html:
+    toc: true
+    embed-resources: true
+    
+execute:
+  echo: false
+  warning: false
+
+from: markdown+emoji 
+reference-location: margin
+citation-location: margin
+---
+
+
+# Introduction
+
+## Project Overview
+
+In this project, we aim to build a predictive model for credit risk with the goal of preventing default. The model will help financial institutions better assess the risk associated with credit applications. This report details the process from data loading and exploration to model building and evaluation.
+
+## Project Repository
+
+You can find the code and data for this project in my [https://github.com/STAT359-2024SU/359-final-project-CaseyArbelaez](https://github.com/STAT359-2024SU/359-final-project-CaseyArbelaez).
+
+## Data Source
+
+The dataset used for this analysis is sourced from Kaggle and contains various attributes related to credit applications. The data will be used to predict credit risk and improve default prevention strategies.
+
+# Necessary Libraries
+
+Before diving into the data, we need to load the essential libraries required for our analysis. These libraries include packages for data manipulation, model training, and evaluation.
+
+```{r echo=FALSE}
+# Load necessary packages
+library(tidyverse)
+library(tidymodels)
+library(tidyselect)
+library(recipes)
+library(parsnip)
+library(glmnet)
+library(grid)
+library(kableExtra)
+library(png)
+library(ROSE)
+library(dplyr)
+library(doParallel)
+library(workflows)
+library(knitr)
+library(tune)
+library(furrr)
+library(yardstick)
+library(here)
+library(magick)
+library(rsample)
+library(corrplot)
+```
+
+# Data Loading
+
+## Loading the Dataset
+
+We start by loading the dataset into a variable for further analysis. This step is crucial as it prepares the data for subsequent preprocessing and modeling tasks.
+
+```{r echo=FALSE}
+# Load the data
+credit_data <- read_csv("../data/application_data.csv")
+```
+
+```{r echo=FALSE}
+summary(credit_data)
+```
+
+```{r echo=FALSE}
+# Calculate and print the percentage of observations in the minority class
+target_counts <- table(credit_data$TARGET)
+minority_class_percentage <- (min(target_counts) / sum(target_counts)) * 100
+
+# Print the percentage of the minority class
+cat("Percentage of observations in the minority class:", round(minority_class_percentage, 2), "%\n")
+```
+
+## Visualizing Class Imbalance on Original Dataset
+
+To further understand the dataset, we visualize the distribution of the `TARGET` variable to illustrate any class imbalance. This plot will help us see the proportion of positive and negative cases in the original dataset.
+
+
+```{r echo=FALSE}
+# Load ggplot2 for visualization
+library(ggplot2)
+
+# Plot class imbalance
+ggplot(credit_data, aes(x = as.factor(TARGET))) +
+  geom_bar(fill = "steelblue") +
+  labs(title = "Class Distribution of TARGET Variable in Original Dataset",
+       x = "TARGET",
+       y = "Count") +
+  theme_minimal()
+```
+
+# EDA
+
+To start our EDA (Exploratory Data Analysis), let's perform the following steps:
+
+1. **Check for Missing Values**
+2. **Summary Statistics for Numerical Features**
+3. **Distribution Plots for Key Numerical Variables**
+4. **Categorical Variable Analysis**
+
+### 1. Check for Missing Values
+
+Understanding the amount of missing data in each column helps us plan our data cleaning and preprocessing steps.
+
+```{r echo=FALSE}
+# Check for missing values
+missing_values <- sapply(credit_data, function(x) sum(is.na(x)))
+missing_values <- data.frame(Variable = names(missing_values), Missing = missing_values)
+missing_values <- missing_values[missing_values$Missing > 0, ]  # Only show variables with missing values
+missing_values <- missing_values[order(-missing_values$Missing), ]  # Sort by the number of missing values
+print(missing_values)
+```
+
+### 2. Summary Statistics for Numerical Features
+
+We'll explore the summary statistics to get a sense of the range, central tendency, and spread of the numerical features.
+
+```{r echo=FALSE}
+# Summary statistics for numerical features
+summary(select_if(credit_data, is.numeric))
+```
+
+### 3. Distribution Plots for Key Numerical Variables
+
+Visualizing the distribution of key numerical variables can help us detect skewness, outliers, and the need for transformations.
+
+```{r echo=FALSE}
+# Select key numerical columns
+key_numerical_vars <- c("AMT_CREDIT", "AMT_INCOME_TOTAL", "AMT_ANNUITY", "DAYS_EMPLOYED")
+
+# Plot histograms for the key numerical variables
+credit_data %>%
+  select(all_of(key_numerical_vars)) %>%
+  gather(key = "Variable", value = "Value") %>%
+  ggplot(aes(x = Value)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "black") +
+  facet_wrap(~ Variable, scales = "free") +
+  labs(title = "Distribution of Key Numerical Variables") +
+  theme_minimal()
+```
+
+### 4. Categorical Variable Analysis
+
+Visualizing the distribution of categorical variables helps us understand the frequency of different categories.
+
+```{r echo=FALSE}
+# Select key categorical columns
+key_categorical_vars <- c("NAME_CONTRACT_TYPE", "CODE_GENDER", "FLAG_OWN_CAR", "FLAG_OWN_REALTY")
+
+# Plot bar charts for the key categorical variables
+credit_data %>%
+  select(all_of(key_categorical_vars)) %>%
+  gather(key = "Variable", value = "Value") %>%
+  ggplot(aes(x = Value)) +
+  geom_bar(fill = "steelblue", color = "black") +
+  facet_wrap(~ Variable, scales = "free") +
+  labs(title = "Distribution of Key Categorical Variables") +
+  theme_minimal()
+```
+
+## PCA Analysis
+
+Let's perform PCA (Principal Component Analysis) to identify the variance captured by the principal components and visualize it using scree plots and cumulative explained variance. This will help us assess whether we can reduce dimensionality by leveraging strong linear relationships in the data.
+
+### Steps:
+1. **Data Preparation**: We will preprocess the data, focusing on scaling numeric columns.
+2. **PCA Computation**: Perform PCA on the standardized numeric data.
+3. **Scree Plot**: Plot the explained variance of each principal component.
+4. **Cumulative Explained Variance Plot**: Visualize the cumulative variance explained to determine the number of components needed to capture most of the variance.
+
+### 1. Data Preparation
+
+First, let's preprocess the data by selecting numeric columns and standardizing them.
+
+```{r echo=FALSE}
+# Remove non-numeric columns and target variable
+numeric_data <- select_if(credit_data, is.numeric)
+
+# Drop columns with a significant amount of missing values or perform imputation (if needed)
+numeric_data <- numeric_data %>% na.omit()  # Simple approach: remove rows with missing data
+
+# Standardize numeric features
+numeric_data_scaled <- scale(numeric_data)
+```
+
+### 2. PCA Computation
+
+Now, let's perform PCA on the scaled numeric data.
+
+```{r echo=FALSE}
+# Identify and remove zero-variance columns
+non_constant_columns <- numeric_data[, apply(numeric_data, 2, var) != 0]
+
+# Normalize the non-constant data (mean = 0, sd = 1)
+numeric_data_scaled <- scale(non_constant_columns)
+
+# Perform PCA
+pca_model <- prcomp(numeric_data_scaled, center = TRUE, scale. = TRUE)
+
+# Extract the explained variance for each component
+explained_variance <- pca_model$sdev^2 / sum(pca_model$sdev^2)
+cumulative_variance <- cumsum(explained_variance)
+```
+
+### 3. Scree Plot
+
+We'll plot the variance explained by each principal component.
+
+```{r echo=FALSE}
+# Scree plot: Explained variance by each principal component
+scree_plot <- ggplot(data.frame(PC = 1:length(explained_variance), Variance = explained_variance),
+                     aes(x = PC, y = Variance)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  labs(x = "Principal Component", y = "Variance Explained", title = "Scree Plot") +
+  theme_minimal()
+print(scree_plot)
+```
+
+### 4. Cumulative Explained Variance Plot
+
+Next, we'll visualize the cumulative explained variance to determine how many components explain a significant portion of the variance.
+
+```{r echo=FALSE}
+# Cumulative variance plot
+cumulative_variance_plot <- ggplot(data.frame(PC = 1:length(cumulative_variance), CumulativeVariance = cumulative_variance),
+                                   aes(x = PC, y = CumulativeVariance)) +
+  geom_line(color = "steelblue") +
+  geom_point(color = "steelblue") +
+  labs(x = "Principal Component", y = "Cumulative Variance Explained", title = "Cumulative Explained Variance") +
+  theme_minimal()
+print(cumulative_variance_plot)
+```
+
+### Interpretation
+
+- **Scree Plot**: This plot will show how much variance each principal component explains. Look for the "elbow" point where adding more components yields diminishing returns in explained variance.
+  
+- **Cumulative Explained Variance Plot**: This will help identify the number of principal components that capture a desired threshold (e.g., 90%) of the total variance.
+
+Based on these plots, our columns in the data do not show strong linear relationships between one another since based on our scree plot the first Principal Component only obtains 20% of the variation in the data. In order to obtain 90% of the data we would need to acquire about 50 principal components. Therefore a PCA will not be a beneficial transformation to perform due to the more complex relationships in the data especially considering that we have a class imbalance, it is crucial that we preserve our data.
+
+## UMAP (Uniform Manifold Approximation and Projection) Analysis
+
+I attempted to use UMAP (Uniform Manifold Approximation and Projection) to explore whether it could cluster our credit_data more effectively than PCA, potentially capturing more complex relationships in a low-dimensional projection. UMAP is particularly useful when data has non-linear relationships that PCA might not capture due to its linear nature. By applying UMAP, I aimed to visualize the data in 2D and 3D spaces to check for any natural clusters that might emerge, especially given the imbalanced nature of our target variable. 
+
+### Steps
+
+1. **Data Preparation**:  
+   - I performed one-hot encoding on the categorical variables and dropped columns with over 100,000 missing values. I also removed rows with missing data.
+   - To deal with class imbalance, I downsampled the data to create a balanced subset for the analysis.
+
+2. **UMAP Implementation**:  
+   - I performed UMAP dimensionality reduction with specified parameters such as `n_neighbors` and `min_dist` to project the data into two and three dimensions.
+   - I plotted the UMAP results using both 2D and 3D visualizations to observe how well the data clustered according to the target variable.
+
+3. **Hyperparameter Tuning**:  
+   - I explored different hyperparameter combinations for UMAP by looping through various values of `n_neighbors`, `min_dist`, and `spread`.
+   - For each combination, I generated and saved plots to visualize how changes in these parameters affected the clustering.
+
+4. **Comparison with PCA**:  
+   - By using UMAP, I sought to explore potential non-linear relationships and more complex clustering structures that PCA might miss, especially in cases where linear assumptions do not hold strongly.
+   
+Here are some of the plots that were generated by this transformation:
+
+```{r echo=FALSE}
+# Load the UMAP projections in 2D images
+knitr::include_graphics(c("../plots/umap_plot_1.png",
+  "../plots/umap_plot_7.png",
+  "../plots/umap_plot_15.png",
+  "../plots/umap_plot_23.png",
+  "../plots/umap_plot_28.png"))
+```
+
+Note: For more plots with different hyper parameters check out the plots folder in the repo
+
+UMAP is a powerful tool for visualizing high-dimensional data, and it complements PCA well, especially when the data exhibits non-linear relationships that are not fully captured by linear techniques like PCA. However, even though these transformations fail to reveal underlying clusters within our data, they still motivate the exploration component in EDA. For future reference, we can experiment with PCA -> UMAP -> KNN model or UMAP -> KNN model because while our UMAP did not result in global clusters, locally there were some cluster that could be observed. This may be something we look into further as we could build a KNN classifier with small k to pick up on the regional patterns that are being recognized in our UMAP.
+
+
+# Feature Selection
+
+Based on our inspection, we will select specific categorical and numerical columns for our logistic regression, knn, and Random Forest model. The chosen categorical features include:
+Certainly! Here's the description of each feature in the same format:
+
+## Categorical Features:
+
+- **`CODE_GENDER`**: Gender of the applicant (e.g., "M" for Male, "F" for Female).
+- **`NAME_CONTRACT_TYPE`**: Type of loan contract (e.g., "Cash loans," "Revolving loans").
+- **`FLAG_OWN_CAR`**: Indicates car ownership ("Y" for Yes, "N" for No).
+- **`FLAG_OWN_REALTY`**: Indicates real estate ownership ("Y" for Yes, "N" for No).
+- **`NAME_INCOME_TYPE`**: Type of income of the applicant (e.g., "Working," "Commercial associate," "Pensioner").
+- **`NAME_EDUCATION_TYPE`**: Educational background of the applicant (e.g., "Higher education," "Secondary education," "Incomplete higher").
+- **`NAME_FAMILY_STATUS`**: Family status of the applicant (e.g., "Married," "Single / not married," "Divorced").
+- **`NAME_HOUSING_TYPE`**: Housing situation of the applicant (e.g., "House / apartment," "With parents," "Municipal apartment").
+- **`WEEKDAY_APPR_PROCESS_START`**: Day of the week when the application process started (e.g., "Monday," "Tuesday").
+- **`REG_REGION_NOT_LIVE_REGION`**: Indicates if the applicant's region is not the same as the registration region ("Y" for Yes, "N" for No).
+
+## Numerical Features:
+
+- **`AMT_ANNUITY`**: Annual loan payment amount.
+- **`AMT_CREDIT`**: Total credit amount provided.
+- **`CNT_CHILDREN`**: Number of children or dependents.
+- **`AMT_INCOME_TOTAL`**: Total annual income of the applicant.
+- **`AMT_GOODS_PRICE`**: Price of the goods the loan is taken for.
+- **`DAYS_EMPLOYED`**: Number of days since the applicant was last employed (negative values represent days before the application date).
+- **`DAYS_REGISTRATION`**: Number of days since the applicant registered their residence (negative values represent days before the application date).
+- **`DAYS_BIRTH`**: Age of the applicant in days (negative values represent days before the application date).
+- **`AMT_REQ_CREDIT_BUREAU_HOUR`**: Number of credit bureau requests in the past hour.
+- **`AMT_REQ_CREDIT_BUREAU_DAY`**: Number of credit bureau requests in the past day.
+- **`AMT_REQ_CREDIT_BUREAU_WEEK`**: Number of credit bureau requests in the past week.
+- **`AMT_REQ_CREDIT_BUREAU_MON`**: Number of credit bureau requests in the past month.
+- **`AMT_REQ_CREDIT_BUREAU_QRT`**: Number of credit bureau requests in the past quarter.
+- **`AMT_REQ_CREDIT_BUREAU_YEAR`**: Number of credit bureau requests in the past year.
+- **`OBS_30_CNT_SOCIAL_CIRCLE`**: Number of social circle members with 30 or more days overdue on credit.
+- **`DEF_30_CNT_SOCIAL_CIRCLE`**: Number of social circle members who defaulted in the past 30 days.
+- **`OBS_60_CNT_SOCIAL_CIRCLE`**: Number of social circle members with 60 or more days overdue on credit.
+- **`DEF_60_CNT_SOCIAL_CIRCLE`**: Number of social circle members who defaulted in the past 60 days.
+- **`DAYS_LAST_PHONE_CHANGE`**: Number of days since the applicant last changed their phone number.
+
+These features are chosen based on their potential relevance to the credit risk prediction as I believe these would be key indicators to analyze before issuing a loan to somebody.
+
+
+```{r echo=FALSE}
+# Define the columns to keep
+categorical_cols <- c("CODE_GENDER", "NAME_CONTRACT_TYPE", "FLAG_OWN_CAR",                              "FLAG_OWN_REALTY", "NAME_INCOME_TYPE", "NAME_EDUCATION_TYPE",                       "NAME_FAMILY_STATUS", "NAME_HOUSING_TYPE",                                          "WEEKDAY_APPR_PROCESS_START", "REG_REGION_NOT_LIVE_REGION")
+
+numerical_cols <- c("AMT_ANNUITY", "AMT_CREDIT", "CNT_CHILDREN", "AMT_INCOME_TOTAL",                     "AMT_GOODS_PRICE", "DAYS_EMPLOYED", "DAYS_REGISTRATION", "DAYS_BIRTH", 
+                     "AMT_REQ_CREDIT_BUREAU_HOUR", "AMT_REQ_CREDIT_BUREAU_DAY", 
+                     "AMT_REQ_CREDIT_BUREAU_WEEK", "AMT_REQ_CREDIT_BUREAU_MON", 
+                     "AMT_REQ_CREDIT_BUREAU_QRT", "AMT_REQ_CREDIT_BUREAU_YEAR", 
+                     "OBS_30_CNT_SOCIAL_CIRCLE", "DEF_30_CNT_SOCIAL_CIRCLE", 
+                     "OBS_60_CNT_SOCIAL_CIRCLE", "DEF_60_CNT_SOCIAL_CIRCLE", 
+                     "DAYS_LAST_PHONE_CHANGE")
+
+target_col <- c("TARGET")
+
+# Combine the categorical and numerical columns
+columns_to_keep <- c(target_col, categorical_cols, numerical_cols)
+
+# Use dplyr::select() without all_of()
+selected_data <- credit_data %>%
+  select(any_of(columns_to_keep))
+```
+
+Selecting the relevant columns from the dataset to focus on key variables for analysis.
+
+```{r echo=FALSE}
+# Calculate the number of missing values for each column
+missing_values_summary <- colSums(is.na(selected_data))
+
+# Print the missing values summary
+print(missing_values_summary)
+
+# Drop rows with any missing values
+cleaned_data <- selected_data %>%
+  drop_na()
+
+# Print the dimensions of the cleaned dataset
+print(dim(cleaned_data))
+```
+
+Assessing the amount of missing data in the selected columns and removing rows with any missing values to prepare the data for further analysis.
+
+```{r echo=FALSE}
+# Check for XNA values in each column
+xna_counts <- apply(cleaned_data, 2, function(x) sum(x == "XNA", na.rm = TRUE))
+
+# Print the counts of XNA values for each column
+print(xna_counts)
+```
+
+Filtering the dataset to remove rows with specific unwanted values and examining the target variable's distribution to understand the class imbalance.
+
+```{r echo=FALSE}
+# Create filter_data to exclude rows with specific values
+filter_data <- cleaned_data %>%
+  filter(
+    CODE_GENDER != "XNA",
+    !is.na(AMT_GOODS_PRICE),
+    !is.na(AMT_ANNUITY),
+    AMT_INCOME_TOTAL < 9e6
+  )
+
+table(filter_data$TARGET)
+
+# Calculate and print the percentage of observations in the minority class
+target_counts <- table(filter_data$TARGET)
+minority_class_percentage <- (min(target_counts) / sum(target_counts)) * 100
+
+# Print the percentage of the minority class
+cat("Percentage of observations in the minority class:", round(minority_class_percentage, 2), "%\n")
+```
+
+## Visualizing Class Imbalance on Cleaned Dataset
+
+To further understand the dataset, we visualize the distribution of the `TARGET` variable to illustrate any class imbalance. This plot will help us see the proportion of positive and negative cases in the Cleaned dataset. It is important to note that by dropping the observations with NA values our class imbalance decreased by 0.34% which is significant considering 8.07% was the percentage of the minority class in the original dataset. For future development, one alternative to dropping observations with NA values can be to simply replace them with the median (for numeric features) or mode (for categorical features) response in that particular feature column.
+
+
+```{r echo=FALSE}
+# Load ggplot2 for visualization
+library(ggplot2)
+
+# Plot class imbalance
+ggplot(filter_data, aes(x = as.factor(TARGET))) +
+  geom_bar(fill = "lightgreen") +
+  labs(title = "Class Distribution of TARGET Variable in Cleaned Dataset",
+       x = "TARGET",
+       y = "Count") +
+  theme_minimal()
+```
+
+# Data Sampling
+
+## Random Sampling for Balanced Dataset
+
+To enhance the efficiency of model training and ensure a manageable dataset size, we randomly sample the data to achieve a total of 30,000 observations. This process involves calculating the proportion of each class in the original dataset and then determining the number of samples needed from each class to maintain the original distribution.
+
+```{r echo=FALSE}
+# Set seed for reproducibility
+set.seed(123)
+
+target_size <- 30000
+
+# Calculate the number of observations in each class
+class_counts <- credit_data %>%
+  group_by(TARGET) %>%
+  summarize(count = n(), .groups = 'drop')
+
+# Calculate the proportion of each class
+class_proportions <- class_counts %>%
+  mutate(proportion = count / sum(count))
+
+# Determine the number of samples to take from each class
+samples_per_class <- class_proportions %>%
+  mutate(samples = round(target_size * proportion)) %>%
+  select(TARGET, samples) %>%
+  deframe()
+
+# Function to sample data for each class
+sample_class <- function(data, samples, class) {
+  data %>%
+    filter(TARGET == class) %>%
+    slice_sample(n = samples, replace = FALSE)
+}
+
+# Apply the sampling function to each class
+downsampled_data_list <- lapply(names(samples_per_class), function(class) {
+  sample_class(filter_data, samples_per_class[[class]], class)
+})
+
+# Combine the downsampled data from each class
+downsampled_data <- bind_rows(downsampled_data_list)
+
+# Save the combined downsampled data to a CSV file
+write_csv(downsampled_data, "../data/downsampled_data.csv")
+
+
+# Calculate and print the percentage of observations in the minority class
+target_counts <- table(downsampled_data$TARGET)
+```
+
+To improve training efficiency and manage the size of the dataset, we downsample it to 30,000 observations. We first calculate the proportion of each class in the original dataset and then determine how many samples to draw from each class to maintain these proportions in the downsampled dataset. By setting a seed, we ensure that the sampling process is reproducible. The sampling function extracts the required number of samples for each class, and the results are combined into a single dataset. This balanced dataset is then saved for use in subsequent model training, allowing for more efficient and focused analysis.
+
+## Visualizing Class Imbalance on Downsampled Dataset
+
+To further understand the downsampled dataset, we visualize the distribution of the `TARGET` variable to illustrate any class imbalance and show that it resembles that of the original dataset. This plot will help us see the proportion of positive and negative cases in the Downsampled dataset.
+
+```{r echo=FALSE}
+minority_class_percentage <- (min(target_counts) / sum(target_counts)) * 100
+
+# Print the percentage of the minority class
+cat("Percentage of observations in the minority class:", round(minority_class_percentage, 2), "%\n")
+
+```
+
+```{r echo=FALSE}
+# Plot class imbalance
+ggplot(downsampled_data, aes(x = as.factor(TARGET))) +
+  geom_bar(fill = "steelblue") +
+  labs(title = "Class Distribution of TARGET Variable in Downsampled Data",
+       x = "TARGET",
+       y = "Count") +
+  theme_minimal()
+```
+
+
+As we can see the downsampled data target variable distribution mimics the original data target target variable distribution very well because we sampled based off the original populations target variable distribution. However, this does not save us from the large gap between classes in the target variable. This naturally leads us to consider upsampling on our minority class to prevent the model from getting over influenced from the majority class.
+
+
+## Visualizing Feature Distributions
+
+To better understand the distribution of our feature variables, we plot histograms. This helps us identify the distribution patterns and the need for any transformations.
+
+```{r echo=FALSE}
+# Function to plot and save histogram for a single variable with log transformation
+plot_histogram_logs <- function(data, var_name, save_path = "../plots/") {
+  # Apply log transformation
+  transformed_var <- paste0("log(abs(", var_name, ") + 1)")
+  
+  # Create the plot
+  p <- ggplot(data, aes_string(x = transformed_var)) +
+    geom_histogram(bins = 30, fill = "steelblue", color = "black") +
+    labs(
+      title = paste("Histogram of", var_name, "(Log-transformed)"),
+      x = paste("log(abs(", var_name, ") + 1)"),
+      y = "Frequency"
+    ) +
+    theme_minimal()
+  
+  # Save the plot
+  ggsave(filename = file.path(save_path, paste0("histogram_", var_name, "_log_transformed.png")), plot = p)
+  
+  # Return the plot for printing
+  return(p)
+}
+
+# Function to plot and save histogram for a single variable
+plot_histogram <- function(data, var_name, save_path = "../plots/") {
+  # Create the plot
+  p <- ggplot(data, aes_string(x = var_name)) +
+    geom_histogram(bins = 30, fill = "steelblue", color = "black") +
+    labs(
+      title = paste("Histogram of", var_name),
+      x = var_name,
+      y = "Frequency"
+    ) +
+    theme_minimal()
+  
+  # Save the plot
+  ggsave(filename = file.path(save_path, paste0("histogram_", var_name, ".png")), plot = p)
+  
+  # Return the plot for printing
+  return(p)
+}
+
+# Function to plot and save histogram for a single variable with power transformation
+plot_histogram_power <- function(data, var_name, power, save_path = "../plots/") {
+  # Apply power transformation
+  transformed_var <- paste0("abs(", var_name, ")^", power)
+  
+  # Create the plot
+  p <- ggplot(data, aes_string(x = transformed_var)) +
+    geom_histogram(bins = 30, fill = "steelblue", color = "black") +
+    labs(
+      title = paste("Histogram of", var_name, "(Power-transformed)"),
+      x = paste("(", var_name, ")^", power),
+      y = "Frequency"
+    ) +
+    theme_minimal()
+  
+  # Save the plot
+  ggsave(filename = file.path(save_path, paste0("histogram_", var_name, "_power_transformed.png")), plot = p)
+  
+  # Return the plot for printing
+  return(p)
+}
+```
+
+
+We define three functions for plotting histograms. The `plot_histogram_logs` function applies a log transformation to better visualize variables with skewed distributions, making them easier to interpret. The `plot_histogram` function plots the distribution of a variable without transformation. The new `plot_histogram_power` function applies a power transformation (such as square root) to visualize variables that benefit from reducing skewness. These plots help us understand the distribution and skewness of each feature, which can inform our decisions on necessary data transformations or preprocessing steps for the modeling phase.
+
+
+# Visualizing Numeric Variable Distributions
+
+To gain insights into the distribution of numeric variables, we generate histograms for each variable. This helps us understand their distributions and decide if any transformations are needed.
+
+## Histograms of Numeric Variables
+
+First, we plot histograms for all numeric variables without applying any transformations.
+
+```{r echo=FALSE}
+# Create histograms for all numeric variables
+numeric_vars <- names(downsampled_data)[sapply(downsampled_data, is.numeric)]
+
+# Plot histograms for each numeric variable
+plots <- lapply(numeric_vars, function(var) plot_histogram(downsampled_data, var))
+
+# Print all plots
+print(plots)
+```
+
+These histograms provide a visual representation of the distribution of each numeric variable. They reveal the general shape of the data, including any skewness or extreme values.
+
+Next, we apply a log transformation to these variables and plot the histograms again.
+
+```{r echo=FALSE}
+# Plot histograms for each numeric variable with log transformation
+plots <- lapply(numeric_vars, function(var) plot_histogram_logs(downsampled_data, var))
+
+# Print all plots
+print(plots)
+```
+
+These histograms provide a visual representation of the distribution of each numeric variable with a log transformation. With this transformation, we see that some numerical features benefit greatly from this, which we will cover later on.
+
+Next, we apply a square root transformation to these variables and plot the histograms again.
+
+```{r echo=FALSE}
+# Plot histograms for each numeric variable with log transformation
+plots <- lapply(numeric_vars, function(var) plot_histogram_power(downsampled_data, var, 0.5))
+
+# Print all plots
+print(plots)
+```
+
+
+## Benefits of Log and Square Root Transformations
+
+### Log Transformation
+
+The histograms with log transformation offer a clearer view of the data distribution, especially for variables with skewed distributions or extreme values. Variables like `AMT_CREDIT` and `AMT_INCOME_TOTAL` often exhibit a right-skewed distribution that can be better normalized using a log transformation. This makes the data more suitable for modeling, as many machine learning algorithms perform better with features that approximate a normal distribution.
+
+**Variables Transformed Using Log:**
+- **`AMT_ANNUITY`**: Reduces the impact of high values and normalizes the distribution.
+- **`AMT_CREDIT`**: Addresses right skewness and helps in stabilizing variance.
+- **`AMT_INCOME_TOTAL`**: Reduces extreme values and helps in normalizing income distribution.
+- **`AMT_GOODS_PRICE`**: Normalizes high-value outliers and improves data distribution.
+- **`DAYS_EMPLOYED`**: Helps to reduce the impact of extreme values related to employment duration.
+
+### Square Root Transformation
+
+Square root transformation is effective for variables with a distribution that exhibits moderate skewness, particularly when the values are non-negative and have a range of scales. It reduces the impact of large values and stabilizes variance, making the data more manageable for modeling.
+
+**Variables Transformed Using Square Root:**
+- **`DAYS_REGISTRATION`**: Reduces skewness and normalizes the distribution of registration days.
+- **`DAYS_BIRTH`**: Addresses skewness and makes age-related data more suitable for modeling.
+
+**Note:** The `CNT_CHILDREN` along with other variables does not benefit significantly from log transformation due to its discrete nature and relatively consistent range of values. Therefore, it is left unchanged in our transformation process.
+
+By applying these transformations, we aim to improve the distribution of our features, making them more appropriate for machine learning models and improving overall model performance.
+
+
+# Data Preparation and Balancing
+
+## Splitting the Data
+
+To build and evaluate our predictive model, we first split the downsampled dataset into training and testing sets. We use an 80-20 split, ensuring that both sets maintain a representative distribution of the target variable.
+
+```{r echo=FALSE}
+# Convert target variable to factor
+downsampled_data$TARGET <- as.factor(downsampled_data$TARGET)
+
+# Perform the initial split on downsampled data
+split <- initial_split(downsampled_data, prop = 0.8, strata = "TARGET")
+
+# Create training and testing datasets
+train_data <- training(split)
+test_data <- testing(split)
+```
+
+## Handling Class Imbalance
+
+In our dataset, the `TARGET` variable is extremely imbalanced, meaning that the number of non-default cases far exceeds the number of default cases. This imbalance can lead to biased models that favor the majority class. To address this, we use the ROSE (Random Over-Sampling Examples) library to upsample the minority class, increasing its representation in the training data so that the model can learn about the minority class.
+
+```{r echo=FALSE}
+# Upsample data
+upsampled_data <- ovun.sample(TARGET ~ ., data = train_data, method = "over", N = 30000)$data
+
+# Verify the new class distribution
+table(upsampled_data$TARGET)
+
+# Create folds
+cv_folds <- vfold_cv(upsampled_data, v = 5, repeats = 1, strata = "TARGET")
+```
+```{r echo=FALSE}
+# Plot class imbalance
+ggplot(upsampled_data, aes(x = as.factor(TARGET))) +
+  geom_bar(fill = "steelblue") +
+  labs(title = "Class Distribution of TARGET Variable in Upsampled Data",
+       x = "TARGET",
+       y = "Count") +
+  theme_minimal()
+```
+```{r echo=FALSE}
+# Calculate and print the percentage of observations in the minority class
+target_counts <- table(upsampled_data$TARGET)
+minority_class_percentage <- (min(target_counts) / sum(target_counts)) * 100
+
+# Print the percentage of the minority class
+cat("Percentage of observations in the minority class:", round(minority_class_percentage, 2), "%\n")
+```
+
+
+By generating more examples of the minority class (fraud cases), we ensure that the model learns about both classes more effectively. This helps prevent the majority class from overwhelming the model's learning process and improves the model's ability to detect fraud.
+
+# Preprocessing Recipes and Model Workflows
+
+In this section, we define and apply preprocessing recipes for our models. These recipes ensure that the data is properly prepared before training. We will cover logistic regression, k-Nearest Neighbors (KNN), and Random Forest (RF) models. We are going to use ROC_AUC
+
+## Logistic Regression
+
+**Recipe Definition**
+
+For the logistic regression model, we create a recipe that includes:
+
+- **One-Hot Encoding**: Converts categorical variables into a binary matrix.
+- **Zero Variance Removal**: Removes predictors with no variance.
+- **Log Transformation**: Applies a log transformation to skewed numerical variables to improve normality.
+- **Centering and Scaling**: Centers and scales numerical predictors to standardize them.
+
+```{r echo=FALSE}
+# Recipe with specified transformations
+transformation_recipe <- recipe(TARGET ~ ., data = downsampled_data) %>%
+  step_mutate(AMT_ANNUITY = log(abs(AMT_ANNUITY) + 1),
+              AMT_CREDIT = log(abs(AMT_CREDIT) + 1),
+              AMT_INCOME_TOTAL = log(abs(AMT_INCOME_TOTAL) + 1),
+              AMT_GOODS_PRICE = log(abs(AMT_GOODS_PRICE) + 1),
+              DAYS_EMPLOYED = log(abs(DAYS_EMPLOYED) + 1),
+              DAYS_REGISTRATION = sqrt(abs(DAYS_REGISTRATION)),
+              DAYS_BIRTH = sqrt(abs(DAYS_BIRTH))) %>%
+  step_normalize(all_numeric(), -all_outcomes()) %>%
+  step_dummy(all_nominal(), -all_outcomes())
+
+transformation_recipe
+
+# Recipe without transformations
+no_transformation_recipe <- recipe(TARGET ~ ., data = downsampled_data) %>%
+  step_normalize(all_numeric(), -all_outcomes()) %>%
+  step_dummy(all_nominal(), -all_outcomes())
+
+no_transformation_recipe
+```
+
+**Apply the Recipe**
+
+Before training, we apply the recipes to ensure that preprocessing is correctly applied.
+
+```{r echo=FALSE}
+# Prepare and bake the transformed recipe
+transformation_prep <- prep(transformation_recipe, training = downsampled_data)
+transformed_data <- bake(transformation_prep, new_data = downsampled_data)
+
+str(transformed_data)
+```
+
+
+```{r echo=FALSE}
+# Prepare and bake the recipe without transformations
+no_transformation_prep <- prep(no_transformation_recipe, training = downsampled_data)
+no_transformation_data <- bake(no_transformation_prep, new_data = downsampled_data)
+
+str(no_transformation_data)
+```
+
+
+**Model Workflow**
+
+We define and combine the logistic regression model with the preprocessing recipe into a workflow.
+
+```{r echo=FALSE}
+# Define the logistic regression model
+logistic_model <- logistic_reg() %>%
+  set_engine("glm")
+
+# Create a transformed workflow combining the recipe and the model
+logistic_transformed_workflow <- workflow() %>%
+  add_recipe(transformation_recipe) %>%
+  add_model(logistic_model)
+
+# Create a regular workflow combining the recipe and the model
+logistic_regular_workflow <- workflow() %>%
+  add_recipe(no_transformation_recipe) %>%
+  add_model(logistic_model)
+
+```
+
+## k-Nearest Neighbors (KNN)
+
+**Recipe Definition**
+
+For KNN, we create a recipe that includes:
+
+- **One-Hot Encoding**: Converts categorical variables.
+- **Normalization**: Normalizes numerical predictors to a standard range.
+- **Centering and Scaling**: Centers and scales numerical predictors to ensure they contribute equally to the distance calculations in KNN.
+
+```{r echo=FALSE}
+# Create the recipe for preprocessing with upsampled data
+recipe_knn <- recipe(TARGET ~ ., data = upsampled_data) %>%
+  step_dummy(all_nominal(), -all_outcomes()) %>%   # One-hot encode categorical variables
+  step_zv(all_predictors()) %>%  # Remove zero variance predictors
+  step_normalize(all_of(c("AMT_ANNUITY", "AMT_CREDIT", "AMT_INCOME_TOTAL", "AMT_GOODS_PRICE", "DAYS_EMPLOYED", "DAYS_REGISTRATION"))) %>%  # Normalize numeric predictors
+  step_center(all_of(c("AMT_ANNUITY", "AMT_CREDIT", "AMT_INCOME_TOTAL", "AMT_GOODS_PRICE", "DAYS_EMPLOYED", "DAYS_REGISTRATION"))) %>%  # Center numeric predictors
+  step_scale(all_of(c("AMT_ANNUITY", "AMT_CREDIT", "AMT_INCOME_TOTAL", "AMT_GOODS_PRICE", "DAYS_EMPLOYED", "DAYS_REGISTRATION")))  # Scale numeric predictors
+
+# Display the recipe
+recipe_knn
+```
+
+```{r echo=FALSE}
+# Recipe with specified transformations for KNN
+transformation_recipe_knn <- recipe(TARGET ~ ., data = upsampled_data) %>%
+  step_mutate(AMT_ANNUITY = log(abs(AMT_ANNUITY) + 1),
+              AMT_CREDIT = log(abs(AMT_CREDIT) + 1),
+              AMT_INCOME_TOTAL = log(abs(AMT_INCOME_TOTAL) + 1),
+              AMT_GOODS_PRICE = log(abs(AMT_GOODS_PRICE) + 1),
+              DAYS_EMPLOYED = log(abs(DAYS_EMPLOYED) + 1),
+              DAYS_REGISTRATION = sqrt(abs(DAYS_REGISTRATION)),
+              DAYS_BIRTH = sqrt(abs(DAYS_BIRTH))) %>%
+  step_normalize(all_numeric(), -all_outcomes()) %>%
+  step_dummy(all_nominal(), -all_outcomes())
+
+# Display the transformed recipe
+transformation_recipe_knn
+
+# Recipe without transformations for KNN
+no_transformation_recipe_knn <- recipe(TARGET ~ ., data = upsampled_data) %>%
+  step_normalize(all_numeric(), -all_outcomes()) %>%
+  step_dummy(all_nominal(), -all_outcomes())
+
+# Display the non-transformed recipe
+no_transformation_recipe_knn
+```
+
+**Apply the Recipe**
+
+Apply the KNN recipes to ensure all preprocessing steps are correctly implemented.
+
+```{r echo=FALSE}
+# Prepare and bake the transformed recipe
+prepped_recipe_knn_transformed <- transformation_recipe_knn %>%
+  prep(training = upsampled_data, retain = TRUE)
+
+preprocessed_train_data_knn_transformed <- bake(prepped_recipe_knn_transformed, new_data = upsampled_data)
+
+# Inspect the structure and column names of the preprocessed data
+str(preprocessed_train_data_knn_transformed)
+
+# Define and apply the KNN recipe without transformations
+no_transformation_recipe_knn <- recipe(TARGET ~ ., data = upsampled_data) %>%
+  step_normalize(all_numeric(), -all_outcomes()) %>%
+  step_dummy(all_nominal(), -all_outcomes())
+
+# Prepare and bake the recipe without transformations
+prepped_recipe_knn_no_transformation <- no_transformation_recipe_knn %>%
+  prep(training = upsampled_data, retain = TRUE)
+
+preprocessed_train_data_knn_no_transformation <- bake(prepped_recipe_knn_no_transformation, new_data = upsampled_data)
+
+# Inspect the structure and column names of the preprocessed data
+str(preprocessed_train_data_knn_no_transformation)
+```
+
+**Model Workflow**
+
+We define the KNN model, set up a parameter grid for tuning, and combine it with the preprocessing recipe.
+
+```{r echo=FALSE}
+# Define the KNN model specification
+knn_spec <- nearest_neighbor(neighbors = tune()) %>%
+  set_engine("kknn") %>%
+  set_mode("classification")
+
+# Extract parameter set dials and create a grid for tuning with 10 levels
+knn_params <- hardhat::extract_parameter_set_dials(knn_spec) %>%
+  update(neighbors = neighbors(c(1, 20)))
+
+knn_grid <- grid_regular(knn_params, levels = 10) 
+
+# Create the KNN workflow for transformed data
+knn_workflow_transformed <- workflow() %>%
+  add_recipe(transformation_recipe_knn) %>%
+  add_model(knn_spec)
+
+# Create the KNN workflow for non-transformed data
+knn_workflow_no_transformation <- workflow() %>%
+  add_recipe(no_transformation_recipe_knn) %>%
+  add_model(knn_spec)
+
+```
+
+
+## Random Forest (RF)
+
+**Recipe Definition**
+
+For RF, we use a similar recipe to logistic regression with log transformations, centering, and scaling of numerical predictors.
+
+
+
+```{r echo=FALSE}
+# Recipe for random forest with transformations
+transformation_recipe_rf <- recipe(TARGET ~ ., data = upsampled_data) %>%
+  step_mutate(AMT_ANNUITY = log(abs(AMT_ANNUITY) + 1),
+              AMT_CREDIT = log(abs(AMT_CREDIT) + 1),
+              AMT_INCOME_TOTAL = log(abs(AMT_INCOME_TOTAL) + 1),
+              AMT_GOODS_PRICE = log(abs(AMT_GOODS_PRICE) + 1),
+              DAYS_EMPLOYED = log(abs(DAYS_EMPLOYED) + 1),
+              DAYS_REGISTRATION = sqrt(abs(DAYS_REGISTRATION)),
+              DAYS_BIRTH = sqrt(abs(DAYS_BIRTH))) %>%
+  step_normalize(all_numeric(), -all_outcomes()) %>%
+  step_dummy(all_nominal(), -all_outcomes())
+
+# Display the recipe with transformations
+transformation_recipe_rf
+
+```
+
+
+
+```{r echo=FALSE}
+# Apply the recipe with transformations
+prepped_recipe_rf_transformed <- transformation_recipe_rf %>%
+  prep(training = upsampled_data, retain = TRUE)
+
+preprocessed_train_data_rf_transformed <- bake(prepped_recipe_rf_transformed, new_data = upsampled_data)
+
+# Inspect the structure and column names of the preprocessed data
+str(preprocessed_train_data_rf_transformed)
+```
+
+
+**Model Workflow**
+
+We define the RF model, set up a parameter grid for tuning, and combine it with the preprocessing recipe.
+
+
+
+```{r echo=FALSE}
+# Define the random forest model specification
+rf_spec_transformed <- rand_forest(
+  mtry = tune(),
+  min_n = tune(),
+  trees = 1000
+) %>%
+  set_engine("ranger") %>%
+  set_mode("classification")
+
+# Extract parameter set dials and create a grid for tuning
+num_columns_rf_transformed <- ncol(preprocessed_train_data_rf_transformed)  # Number of columns after preprocessing
+num_predictors_rf_transformed <- num_columns_rf_transformed - 1  # Subtract 1 for the TARGET column
+
+rf_params_transformed <- hardhat::extract_parameter_set_dials(rf_spec_transformed) %>%
+  update(mtry = mtry(c(1, floor(0.7 * num_predictors_rf_transformed)))) %>%
+  update(min_n = min_n(c(1, 20)))  # Include min_n in the tuning parameters  
+
+rf_grid_transformed <- grid_regular(rf_params_transformed, levels = 5)
+
+# Create the random forest workflow with transformations
+rf_workflow_transformed <- workflow() %>%
+  add_recipe(transformation_recipe_rf) %>%
+  add_model(rf_spec_transformed)
+
+```
+
+
+# Fine-Tuning and Training Models
+
+We'll proceed by fine-tuning and training our models: logistic regression, k-Nearest Neighbors (KNN), and random forest (RF). For each model, we'll use cross-validation, perform a grid search for hyperparameter tuning (where applicable), and save the results. Finally, we'll analyze the performance metrics for each model, including confusion matrices, to assess their effectiveness on the test data.
+
+## Logistic Regression, KNN, and Random Forest
+
+Lets begin fine tuning!
+
+```{r echo=FALSE, eval=FALSE}
+# Define the number of cores for parallel processing
+num_cores <- 6
+
+# Create a cluster and register the parallel backend
+cl <- makeCluster(num_cores)
+registerDoParallel(cl)
+
+# Perform cross-validation and fit the logistic regression models
+logistic_cv_results_transformed <- logistic_transformed_workflow %>%
+  fit_resamples(
+    resamples = cv_folds,
+    metrics = metric_set(accuracy, roc_auc)
+  )
+
+logistic_cv_results_regular <- logistic_regular_workflow %>%
+  fit_resamples(
+    resamples = cv_folds,
+    metrics = metric_set(accuracy, roc_auc)
+  )
+
+# Stop the cluster
+stopCluster(cl)
+
+# Save cross-validation results
+save(logistic_cv_results_transformed, file = "../results/logistic_cv_results_transformed.rda")
+save(logistic_cv_results_regular, file = "../results/logistic_cv_results_regular.rda")
+```
+
+
+```{r echo=FALSE, eval=FALSE}
+# Fit the final logistic regression models on the upsampled training data
+final_logistic_fit_transformed <- logistic_transformed_workflow %>%
+  fit(data = upsampled_data)
+
+final_logistic_fit_regular <- logistic_regular_workflow %>%
+  fit(data = upsampled_data)
+
+# Predict on the test data
+test_predictions_logistic_transformed <- final_logistic_fit_transformed %>%
+  predict(new_data = test_data) %>%
+  bind_cols(test_data)
+
+test_predictions_logistic_regular <- final_logistic_fit_regular %>%
+  predict(new_data = test_data) %>%
+  bind_cols(test_data)
+```
+
+
+```{r echo=FALSE, eval=FALSE}
+# Generate confusion matrices
+confusion_matrix_logistic_transformed <- test_predictions_logistic_transformed %>%
+  conf_mat(truth = TARGET, estimate = .pred_class)
+
+confusion_matrix_logistic_regular <- test_predictions_logistic_regular %>%
+  conf_mat(truth = TARGET, estimate = .pred_class)
+
+# Convert confusion matrices to tibble for visualization
+conf_matrix_tibble_logistic_transformed <- as_tibble(confusion_matrix_logistic_transformed$table)
+conf_matrix_tibble_logistic_regular <- as_tibble(confusion_matrix_logistic_regular$table)
+
+# Create and save heatmap-style confusion matrix for the transformed workflow
+heatmap_logistic_transformed <- ggplot(conf_matrix_tibble_logistic_transformed, aes(x = Prediction, y = Truth, fill = n)) +
+  geom_tile() +
+  geom_text(aes(label = n), color = "white", size = 6) +
+  scale_fill_gradient(low = "lightblue", high = "darkblue") +
+  labs(
+    title = "Logistic Regression (Transformed): Confusion Matrix",
+    x = "Predicted Class",
+    y = "True Class"
+  ) +
+  theme_minimal()
+
+ggsave(filename = "../results/heatmap_logistic_transformed.png", plot = heatmap_logistic_transformed, width = 8, height = 6)
+
+# Create and save heatmap-style confusion matrix for the regular workflow
+heatmap_logistic_regular <- ggplot(conf_matrix_tibble_logistic_regular, aes(x = Prediction, y = Truth, fill = n)) +
+  geom_tile() +
+  geom_text(aes(label = n), color = "white", size = 6) +
+  scale_fill_gradient(low = "lightblue", high = "darkblue") +
+  labs(
+    title = "Logistic Regression (Regular): Confusion Matrix",
+    x = "Predicted Class",
+    y = "True Class"
+  ) +
+  theme_minimal()
+
+ggsave(filename = "../results/heatmap_logistic_regular.png", plot = heatmap_logistic_regular, width = 8, height = 6)
+
+# View cross-validation results
+logistic_cv_results_transformed %>%
+  collect_metrics()
+
+logistic_cv_results_regular %>%
+  collect_metrics()
+
+```
+
+```{r echo=FALSE, eval=FALSE}
+# Collect metrics from the transformed and regular logistic regression results
+transformed_metrics <- logistic_cv_results_transformed %>%
+  collect_metrics() %>%
+  mutate(Model = "Transformed")
+
+regular_metrics <- logistic_cv_results_regular %>%
+  collect_metrics() %>%
+  mutate(Model = "Regular")
+
+# Combine the metrics into a single data frame
+combined_metrics <- bind_rows(transformed_metrics, regular_metrics)
+
+# Create a pretty table with the combined metrics
+combined_metrics %>%
+  select(Model, .metric, mean, std_err) %>%
+  kable(col.names = c("Model", "Metric", "Mean", "Standard Error"),
+        caption = "Logistic Regression Cross-Validation Results") %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover", "condensed")) %>%
+  save_kable(file = "../results/log_metric_table.html")
+
+
+```
+
+```{r echo=FALSE}
+# Load the HTML file and display it
+library(htmltools)
+
+# Read the HTML file
+table_html <- readLines("../results/log_metric_table.html")
+
+# Display the table
+browsable(HTML(paste(table_html, collapse = "\n")))
+```
+
+
+
+```{r echo=FALSE, eval=FALSE}
+# Number of cores
+num_cores <- 6
+
+# Create a cluster
+cl <- makeCluster(num_cores)
+
+# Register the parallel backend
+registerDoParallel(cl)
+
+# Perform grid search with cross-validation on upsampled data for transformed recipe
+knn_results_transformed <- knn_workflow_transformed %>%
+  tune_grid(
+    resamples = cv_folds,  # Use the cross-validation folds
+    grid = knn_grid,       # Use the tuning grid with 10 levels
+    metrics = metric_set(roc_auc, accuracy),  # Metrics for evaluation
+    control = control_grid(save_pred = TRUE)
+  )
+
+# Save KNN results for transformed recipe
+save(knn_results_transformed, file = "../results/knn_results_transformed.rda")
+
+# Perform grid search with cross-validation on upsampled data for non-transformed recipe
+knn_results_no_transformation <- knn_workflow_no_transformation %>%
+  tune_grid(
+    resamples = cv_folds,  # Use the cross-validation folds
+    grid = knn_grid,       # Use the tuning grid with 10 levels
+    metrics = metric_set(roc_auc, accuracy),  # Metrics for evaluation
+    control = control_grid(save_pred = TRUE)
+  )
+
+# Save KNN results for non-transformed recipe
+save(knn_results_no_transformation, file = "../results/knn_results_no_transformation.rda")
+
+# Stop the cluster
+stopCluster(cl)
+```
+
+
+
+```{r echo=FALSE, eval=FALSE}
+# Finalize and fit the KNN model on the full training data for transformed recipe
+best_knn_transformed <- select_best(knn_results_transformed, metric = "roc_auc")
+
+# Create the final workflow with the best parameters
+final_knn_workflow_transformed <- knn_workflow_transformed %>%
+  finalize_workflow(best_knn_transformed)
+
+# Fit the finalized model on the full training data
+final_knn_fit_transformed <- final_knn_workflow_transformed %>%
+  fit(data = upsampled_data)
+
+# Predict on the test data
+test_predictions_knn_transformed <- final_knn_fit_transformed %>%
+  predict(new_data = test_data) %>%
+  bind_cols(test_data)  # Combine predictions with actual data for evaluation
+
+# Calculate performance metrics on the test data
+test_metrics_knn_transformed <- test_predictions_knn_transformed %>%
+  metrics(truth = TARGET, estimate = .pred_class)
+
+# Display the performance metrics
+print(test_metrics_knn_transformed)
+
+# Display the confusion matrix
+confusion_matrix_knn_transformed <- test_predictions_knn_transformed %>%
+  conf_mat(truth = TARGET, estimate = .pred_class)
+
+# Convert confusion matrix to tibble for visualization
+conf_matrix_tibble_knn_transformed <- as_tibble(confusion_matrix_knn_transformed$table)
+```
+
+
+```{r echo=FALSE, eval=FALSE}
+# Create heatmap-style confusion matrix
+heatmap_knn_transformed <- ggplot(conf_matrix_tibble_knn_transformed, aes(x = Prediction, y = Truth, fill = n)) +
+  geom_tile() +
+  geom_text(aes(label = n), color = "white", size = 6) +
+  scale_fill_gradient(low = "lightblue", high = "darkblue") +
+  labs(
+    title = "K-Nearest Neighbors: Confusion Matrix (Transformed Data)",
+    x = "Predicted Class",
+    y = "True Class"
+  ) +
+  theme_minimal()
+
+# Save the plot
+ggsave(filename = "../results/heatmap_knn_transformed.png", plot = heatmap_knn_transformed)
+
+```
+
+```{r echo=FALSE, eval=FALSE}
+# Finalize and fit the KNN model on the full training data for non-transformed recipe
+best_knn_no_transformation <- select_best(knn_results_no_transformation, metric = "roc_auc")
+
+# Create the final workflow with the best parameters
+final_knn_workflow_no_transformation <- knn_workflow_no_transformation %>%
+  finalize_workflow(best_knn_no_transformation)
+
+# Fit the finalized model on the full training data
+final_knn_fit_no_transformation <- final_knn_workflow_no_transformation %>%
+  fit(data = upsampled_data)
+
+# Predict on the test data
+test_predictions_knn_no_transformation <- final_knn_fit_no_transformation %>%
+  predict(new_data = test_data) %>%
+  bind_cols(test_data)  # Combine predictions with actual data for evaluation
+
+# Calculate performance metrics on the test data
+test_metrics_knn_no_transformation <- test_predictions_knn_no_transformation %>%
+  metrics(truth = TARGET, estimate = .pred_class)
+
+# Display the performance metrics
+print(test_metrics_knn_no_transformation)
+
+# Display the confusion matrix
+confusion_matrix_knn_no_transformation <- test_predictions_knn_no_transformation %>%
+  conf_mat(truth = TARGET, estimate = .pred_class)
+
+# Convert confusion matrix to tibble for visualization
+conf_matrix_tibble_knn_no_transformation <- as_tibble(confusion_matrix_knn_no_transformation$table)
+
+# Create heatmap-style confusion matrix
+heatmap_knn_no_transformation <- ggplot(conf_matrix_tibble_knn_no_transformation, aes(x = Prediction, y = Truth, fill = n)) +
+  geom_tile() +
+  geom_text(aes(label = n), color = "white", size = 6) +
+  scale_fill_gradient(low = "lightblue", high = "darkblue") +
+  labs(
+    title = "K-Nearest Neighbors: Confusion Matrix (No Transformation)",
+    x = "Predicted Class",
+    y = "True Class"
+  ) +
+  theme_minimal()
+
+
+# Save the plot
+ggsave(filename = "../results/heatmap_knn_no_transformation.png", plot = heatmap_knn_no_transformation)
+
+```
+
+```{r echo=FALSE, eval=FALSE}
+# Collect metrics from the KNN models with and without transformation
+knn_metrics_transformed <- test_metrics_knn_transformed %>%
+  mutate(Model = "Transformed")
+
+knn_metrics_no_transformation <- test_metrics_knn_no_transformation %>%
+  mutate(Model = "No Transformation")
+
+# Combine the metrics into a single data frame
+combined_knn_metrics <- bind_rows(knn_metrics_transformed, knn_metrics_no_transformation)
+
+# Create a pretty table with the combined metrics
+combined_knn_metrics %>%
+  select(Model, .metric, .estimate) %>%
+  kable(col.names = c("Model", "Metric", "Estimate"),
+        caption = "K-Nearest Neighbors Performance Metrics") %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover", "condensed")) %>%
+  save_kable(file = "../results/knn_metric_table.html")
+```
+
+```{r echo=FALSE}
+# Read the HTML file
+table_html <- readLines("../results/knn_metric_table.html")
+
+# Display the table
+browsable(HTML(paste(table_html, collapse = "\n")))
+```
+
+
+```{r echo=FALSE, eval=FALSE}
+# Number of cores
+num_cores <- 6
+
+# Create a cluster
+cl <- makeCluster(num_cores)
+
+# Register the parallel backend
+registerDoParallel(cl)
+
+# Perform grid search with cross-validation on upsampled data for transformed recipe
+rf_results_transformed <- rf_workflow_transformed %>%
+  tune_grid(
+    resamples = cv_folds,  # Use the cross-validation folds
+    grid = rf_grid_transformed,       # Use the tuning grid with 5 levels
+    metrics = metric_set(roc_auc, accuracy),  # Metrics for evaluation
+    control = control_grid(save_pred = TRUE)
+  )
+
+# Save RF results for transformed recipe
+save(rf_results_transformed, file = "../results/rf_results_transformed.rda")
+
+# Stop the cluster
+stopCluster(cl)
+
+```
+
+
+```{r echo=FALSE, eval=FALSE}
+best_rf_transformed <- select_best(rf_results_transformed, metric = "roc_auc")
+
+# Create the final workflow with the best parameters
+final_rf_workflow_transformed <- rf_workflow_transformed %>%
+  finalize_workflow(best_rf_transformed)
+
+# Fit the finalized model on the full training data
+final_rf_fit_transformed <- final_rf_workflow_transformed %>%
+  fit(data = upsampled_data)
+
+# Predict on the test data
+test_predictions_rf_transformed <- final_rf_fit_transformed %>%
+  predict(new_data = test_data) %>%
+  bind_cols(test_data)  # Combine predictions with actual data for evaluation
+
+# Calculate performance metrics on the test data
+test_metrics_rf_transformed <- test_predictions_rf_transformed %>%
+  metrics(truth = TARGET, estimate = .pred_class)
+
+# Display the performance metrics
+print(test_metrics_rf_transformed)
+
+# Display the confusion matrix
+confusion_matrix_rf_transformed <- test_predictions_rf_transformed %>%
+  conf_mat(truth = TARGET, estimate = .pred_class)
+
+# Convert confusion matrix to tibble for visualization
+conf_matrix_tibble_rf_transformed <- as_tibble(confusion_matrix_rf_transformed$table)
+
+# Create heatmap-style confusion matrix
+heatmap_rf_transformed <- ggplot(conf_matrix_tibble_rf_transformed, aes(x = Prediction, y = Truth, fill = n)) +
+  geom_tile() +
+  geom_text(aes(label = n), color = "white", size = 6) +
+  scale_fill_gradient(low = "lightblue", high = "darkblue") +
+  labs(
+    title = "Random Forest: Confusion Matrix (Transformed Data)",
+    x = "Predicted Class",
+    y = "True Class"
+  ) +
+  theme_minimal()
+
+# Save the plot
+ggsave(filename = "../results/heatmap_rf_transformed.png", plot = heatmap_rf_transformed)
+```
+
+```{r echo=FALSE, eval=FALSE}
+# Collect metrics from the Random Forest model with transformation
+rf_metrics_transformed <- test_metrics_rf_transformed %>%
+  mutate(Model = "Transformed")
+
+# Combine the metrics into a single data frame
+combined_rf_metrics <- rf_metrics_transformed
+
+# Create a pretty table with the combined metrics
+combined_rf_metrics %>%
+  select(Model, .metric, .estimate) %>%
+  kable(col.names = c("Model", "Metric", "Estimate"),
+        caption = "Random Forest Performance Metrics") %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover", "condensed")) %>%
+  save_kable(file = "../results/rf_metric_table.html")
+```
+
+
+```{r echo=FALSE}
+# Read the HTML file
+table_html <- readLines("../results/rf_metric_table.html")
+
+# Display the table
+browsable(HTML(paste(table_html, collapse = "\n")))
+```
+
+
+# Analyzing Model Performance
+
+After training the models, we analyze their performance using the metrics collected during cross-validation and the predictions on the test dataset. We are going to determine the best model by considering the trade offs between false positives and false negatives and each models ROC_AUC parameter.
+
+## False Positives (FP)
+- **Definition**: False positives occur when the model predicts that a borrower will default on their loan (i.e., `TARGET = 1`), but in reality, the borrower does not default.
+- **Impact**: 
+  - **Financial Cost**: The model incorrectly identifies a credit-worthy borrower as a risk, which could lead to unnecessary denial of credit. This might result in lost opportunities for the lender and potential revenue.
+  - **Customer Experience**: Borrowers who are incorrectly labeled as high-risk might experience frustration or inconvenience if they are denied credit or face higher interest rates.
+
+## False Negatives (FN)
+- **Definition**: False negatives occur when the model predicts that a borrower will not default on their loan (i.e., `TARGET = 0`), but in reality, the borrower does default.
+- **Impact**: 
+  - **Financial Risk**: The model fails to identify a high-risk borrower, potentially leading to financial losses due to defaults that could have been anticipated and mitigated.
+  - **Risk Management**: The lender might face higher-than-expected default rates, which can affect profitability and increase the need for more stringent risk management strategies.
+
+## Balancing False Positives and False Negatives
+In credit risk prediction, it’s crucial to balance false positives and false negatives:
+
+- **Minimizing False Positives**: Reducing false positives helps in approving more credit-worthy applicants. However, if reduced too much, it might lead to increased false negatives.
+
+- **Minimizing False Negatives**: Reducing false negatives ensures that potential defaults are caught early, but if too aggressive, it might result in higher false positives.
+
+Lets analyze the confusion matrix of all models when it is fit to the training data. While this is not common practice and a lot of this computation could have been saved before hand by analyzing our ROC_AUC and accuracy metrics, I believe in this case it was important to get the full picture because high accuracy in our case may not mean a successful model. For example if our model guesses the majority class, it is guaranteed above a 90% accuracy for representative samples of our population data. Therefore, by analyzing the confusion matrix before hand we can make a better informed decision when ultimately declaring a model as the winner.
+
+```{r echo=FALSE}
+# Load the confusion matrix images
+knitr::include_graphics(c("../results/heatmap_rf_transformed.png",
+                          "../results/heatmap_knn_no_transformation.png",
+                          "../results/heatmap_knn_transformed.png",
+                          "../results/heatmap_logistic_regular.png",
+                          "../results/heatmap_logistic_transformed.png"))
+
+```
+
+
+```{r echo=FALSE, eval=FALSE}
+# Assuming we have roc_auc values and predictions for each model stored
+# Ensure TARGET is a factor in test_data
+test_data$TARGET <- as.factor(test_data$TARGET)
+library(yardstick)
+library(ggplot2)
+
+# Generate probability predictions for Random Forest
+prob_predictions_rf <- predict(final_rf_fit_transformed, new_data = test_data, type = "prob") %>%
+  bind_cols(test_data) %>%
+  mutate(TARGET_numeric = as.numeric(TARGET) - 1)  # Ensure numeric TARGET for ROC calculations
+
+# Generate probability predictions for KNN
+prob_predictions_knn_no_transformation <- predict(final_knn_fit_no_transformation, new_data = test_data, type = "prob") %>%
+  bind_cols(test_data) %>%
+  mutate(TARGET_numeric = as.numeric(TARGET) - 1)
+
+# Generate probability predictions for Logistic Regression
+prob_predictions_log_reg <- predict(final_logistic_fit_transformed, new_data = test_data, type = "prob") %>%
+  bind_cols(test_data) %>%
+  mutate(TARGET_numeric = as.numeric(TARGET) - 1)
+```
+
+
+```{r echo=FALSE, eval=FALSE}
+# Calculate ROC AUC for each model
+roc_auc_rf <- prob_predictions_rf %>% roc_auc(truth = TARGET, .pred_1)
+roc_auc_knn <- prob_predictions_knn_no_transformation %>% roc_auc(truth = TARGET, .pred_1)
+roc_auc_log_reg <- prob_predictions_log_reg %>% roc_auc(truth = TARGET, .pred_1)
+
+# Print ROC AUC results
+print(roc_auc_rf)
+print(roc_auc_knn)
+print(roc_auc_log_reg)
+
+# Create ROC curve plots for each model
+roc_curve_rf <- prob_predictions_rf %>%
+  roc_curve(truth = TARGET, .pred_1) %>%
+  autoplot() +
+  labs(
+    title = "ROC Curve: Random Forest",
+    x = "False Positive Rate",
+    y = "True Positive Rate"
+  ) +
+  theme_minimal() +
+  theme(plot.background = element_rect(fill = "white"))
+
+roc_curve_knn <- prob_predictions_knn_no_transformation %>%
+  roc_curve(truth = TARGET, .pred_1) %>%
+  autoplot() +
+  labs(
+    title = "ROC Curve: K-Nearest Neighbors",
+    x = "False Positive Rate",
+    y = "True Positive Rate"
+  ) +
+  theme_minimal() +
+  theme(plot.background = element_rect(fill = "white"))
+
+roc_curve_log_reg <- prob_predictions_log_reg %>%
+  roc_curve(truth = TARGET, .pred_1) %>%
+  autoplot() +
+  labs(
+    title = "ROC Curve: Logistic Regression",
+    x = "False Positive Rate",
+    y = "True Positive Rate"
+  ) +
+  theme_minimal() +
+  theme(plot.background = element_rect(fill = "white"))
+
+# Save the ROC curve plots to the results folder
+ggsave(filename = "../results/roc_curve_rf.png", plot = roc_curve_rf)
+ggsave(filename = "../results/roc_curve_knn.png", plot = roc_curve_knn)
+ggsave(filename = "../results/roc_curve_log_reg.png", plot = roc_curve_log_reg)
+
+
+```
+
+```{r echo=FALSE}
+# Load the ROC curve images
+knitr::include_graphics(c("../results/roc_curve_rf.png",
+                          "../results/roc_curve_knn.png",
+                          "../results/roc_curve_log_reg.png"))
+
+
+```
+
+# Final Model Evaluation
+
+After experimenting with multiple models, we determined that the K-Nearest Neighbors (KNN) model without transformations surprisingly outperformed other models like Logistic Regression and Random Forest. While KNN's success might seem counterintuitive given its sensitivity to unscaled data and outliers, it performed best in terms of the ROC AUC metric. However, despite being the best-performing model from the bunch, there are several important considerations regarding its actual effectiveness.
+
+## 1. ROC AUC Performance and Interpretation:
+   - The ROC AUC for the KNN model was surprisingly low, and the ROC curve appeared **below the y = x line**. This is significant because the y = x line represents a random classifier (i.e., a model with no discriminative power, where the TPR equals the FPR). When the ROC curve falls below this line, it suggests that the model is performing **worse than random guessing**.
+   - **Why this happened**: This outcome indicates that the model might be systematically predicting the opposite class or is heavily skewed by imbalanced data, leading to poor generalization on the test data. Despite the model achieving some level of performance during training and cross-validation, it struggles to differentiate between the positive and negative classes in real-world (testing) scenarios.
+
+## 2. Confusion Matrix Analysis:
+   - The confusion matrix for the KNN model reveals that the model has difficulty in identifying the positive (defaulting) class. The true positives (correctly predicted defaults) are low, while the false negatives (missed defaults) are high. However this is also the case for the other models except KNN along with Logistic Regression did not conform to only guessing the non defaulting class.
+   - **False Positives and False Negatives**: In this context, the high number of false negatives is particularly concerning because it means the model is failing to identify borrowers who will actually default on their loans. This could result in significant financial risks if deployed in a real-world setting.
+
+## 3. Baseline Model Comparison:
+   - It's essential to compare the KNN model to a baseline or null model. A baseline model could simply predict the majority class (e.g., predicting all borrowers as non-defaulting). If our KNN model's performance is not substantially better than this baseline, the effort involved in building and tuning the model may not be justified.
+   - **Does the effort pay off?**: Given the low ROC AUC and the model's difficulty in identifying the defaulting class, the predictive power of the KNN model may not be worth the complexity and effort invested. In this case, a simpler approach, such as a rule-based system or a machine learning model that penalizes double or triple for incorrectly predicting the minority class with regularization to prevent it from being overwhelmed with the class imbalance, which would put greater emphasis to predict correctly from the minority class.
+
+## 4. Challenges with Imbalanced Data:
+   - Even though we applied techniques like upsampling to close the gap between the minority and majority classes, the Random Forest model (and to some extent, the other models) was still overwhelmed by the majority class. This underscores the challenge of dealing with imbalanced data, where traditional machine learning algorithms can struggle to learn meaningful patterns from the minority class.
+   - **Nonlinearities and Complexity**: Random Forest, being a more complex model that handles nonlinearities well, should theoretically perform better in capturing intricate relationships. However, the imbalance in the dataset and perhaps overfitting to the majority class might have hindered its performance. This suggests that more advanced techniques and sophisticated resampling strategies, might be necessary.
+
+## 5. ROC Curve and Performance Visualization:
+   - To further assess the model’s performance, plotting the ROC curves for all models reveals that not only does the KNN model perform poorly, but the ROC curves for the other models also struggle to stay above the y = x line. This indicates that all models are facing difficulty in distinguishing between the positive and negative classes, with little improvement over random guessing.
+
+
+# Conclusion
+- **Best of the models, But Not Enough**: The KNN model without transformations performed best in our testing, but it still struggles with identifying the defaulting class accurately. The low ROC AUC and the confusion matrix results indicate that this model may not be reliable enough for real-world deployment.
+  
+- **Key Learnings**: The imbalance in the dataset, model complexity, and the challenges of proper resampling all contributed to the difficulties faced by our models. Future work should consider more advanced resampling techniques, class-weighted models, or other approaches tailored to handling imbalanced data effectively.
+
+
+
